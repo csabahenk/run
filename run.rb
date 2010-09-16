@@ -53,12 +53,21 @@ module Run
   # _run_ runs the command, waits for its termination, and returns the process
   # exit status (unless the command failed, in which case a Runfail is raised).
   #
-  #   run(*args) { |fo| fo.read .. }
+  # For reading lines from child, do:
   #
-  # passes the child's stdout to the block. Closing stdout is ensured, above
-  # about termination apply here too.
+  #   run(*args) { |l| l =~ /v[1i][4a]gr[4a]/i and break "spam!" }
   #
-  # If you want a customized set of children's descriptors, you can use the
+  # Closing stdout is ensured, above things about termination apply here too.
+  #
+  # For getting the file object as such, add the +:output+ option:
+  #
+  #   run(*args, :output) { |f|
+  #     while b = f.read(1024)
+  #       b =~ /\0/m and break "binary!"
+  #     end
+  #   }
+  #
+  # If you want a customized set of children's descriptors, just use the
   # desired ones of +:input+, +:output+, +:error+:
   #
   #   run("sed", "s/better than //", :input, :output) { |fi, fo|
@@ -91,7 +100,7 @@ module Run
     opts.each { |v| oh[v] = true }
     o = OSSafe.new oh
     if block_given? and !o.input and !o.output and !o.error
-      o.output = true
+      o.output = do_lines = true
     end
     pii, pio, pie = nil
     o.input  and pii = IO.pipe
@@ -124,7 +133,11 @@ module Run
     fa = [(pii||[])[1], (pio||[])[0], (pie||[])[0]].compact
     if block_given?
       begin
-        yield *fa
+        if do_lines
+          fa[0].each { |l| yield l }
+        else
+          yield *fa
+        end
       ensure
         fa.each { |f| f.closed? or f.close }
       end

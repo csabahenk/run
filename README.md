@@ -19,11 +19,11 @@ This is what you want, this is what you get
   (So far so good with `popen3` as well.)
 * The simplest case must be simple:
 
-        run "cat", "/etc/passwd"
+       run "cat", "/etc/passwd"
 
-* The most frequently used case must be simple:
+* The most frequent task must be simple:
 
-        run("ls", "pics") { |f| f.each { |l| puts l if l =~ /jpg$/ } }
+       run("ls", "pics") { |l| puts l if l =~ /jpg$/ }
 
 * Child's failure should be noticed and handled. You get an exception if children fails
   (but you may relax this).
@@ -35,6 +35,12 @@ This is what you want, this is what you get
        pst = run "ls", "/root", :may_fail
        pst.exitstatus
        => 2
+
+* Non-line-oriented reading must be easy too:
+
+       run("zcat", "foo.tar.gz", :output) { |fo|
+         Minitar.unpack fo
+       }
 
 * Play with streams freely.
 
