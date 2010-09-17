@@ -185,6 +185,17 @@ module Run
     pst
   end
 
+  #
+  # equivalent with
+  #
+  #   run!(:may_fail, ...)
+  #
+  # invocation
+  #
+  def run!(*args, &bl)
+    run(*args, :may_fail, &bl)
+  end
+
 end
 
 if __FILE__ == $0
