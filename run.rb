@@ -9,6 +9,15 @@ require 'ostruct'
 module Run
   extend self
 
+  # too hacky too bad ruby doesn't do it for us
+  DEVNULL =
+  if RUBY_PLATFORM =~ /win|mingw|msdos/i and RUBY_PLATFORM !~ /darwin/i
+    'NUL'
+  else
+    '/dev/null'
+  end
+  File.exist? DEVNULL or raise "null device not found"
+
   class Runfail < Exception
   end
 
@@ -23,13 +32,14 @@ module Run
   end
 
   def run_opts_default
-    {:input         => false,
-     :output        => false,
-     :error         => false,
-     :may_fail      => false,
-     :may_fail_loud => false}
+    {:stdin         => false,
+     :stdout        => false,
+     :stderr        => false,
+     :may_fail      => false}
   end
   private :run_opts_default
+
+  @@iomap = { STDIN => :stdin, STDOUT => :stdout, STDERR => :stderr }
 
   # General syntax:
   #
@@ -95,17 +105,29 @@ module Run
   # +:error+ is passed).
   #
   def run *args
-    carg, opts = args.partition {|x| String === x }
-    oh = run_opts_default
-    opts.each { |v| oh[v] = true }
-    o = OSSafe.new oh
-    if block_given? and !o.input and !o.output and !o.error
-      o.output = do_lines = true
+    carg = []
+    tyarg = { Array => carg, String => carg }
+    args.each { |a| (tyarg[a.class] ||= []) << a }
+    carg.flatten!
+    opts = run_opts_default
+    (tyarg[IO]     || []).each { |io| opts[@@iomap[io]] = true }
+    (tyarg[Symbol] || []).each { |s|  opts[s] = true }
+    (tyarg[Hash]   || []).each { |h|
+      h.each { |k, v| opts[IO === k ? @@iomap[k] : k] = v }
+    }
+
+    o = OSSafe.new opts
+    if block_given? and ![o.stdin, o.stdout, o.stderr].include? true
+      o.stdout = do_lines = true
     end
     pii, pio, pie = nil
-    o.input  and pii = IO.pipe
-    o.output and pio = IO.pipe
-    o.error  and pie = IO.pipe
+    o.stdin  == true and pii = IO.pipe
+    o.stdout == true and pio = IO.pipe
+    o.stderr == true and pie = IO.pipe
+    %w[stdin stdout stderr].each { |d|
+      o.send(d) == nil and o.send d + '=', DEVNULL
+    }
+
     pid = fork {
       if pii
         pii[1].close
@@ -118,18 +140,18 @@ module Run
       if pie
         pie[0].close
         STDERR.reopen pie[1]
-      else
-        o.may_fail and begin
-        STDERR.reopen "/dev/null"
-        rescue Errno::ENOENT
-        end
       end
 
+      %w[stdin stdout stderr].each { |d|
+        t = o.send(d)
+        t == !!t or Object.const_get(d.upcase).reopen t
+      }
       exec *carg
     }
     pii and pii[0].close
     pio and pio[1].close
     pie and pie[1].close
+
     fa = [(pii||[])[1], (pio||[])[0], (pie||[])[0]].compact
     if block_given?
       begin
@@ -141,12 +163,14 @@ module Run
       ensure
         fa.each { |f| f.closed? or f.close }
       end
-    elsif o.input or o.output or o.error
+    elsif !fa.empty?
       return fa << pid
     end
+
     pid, pst = Process.wait2 pid
-    pst.success? or o.may_fail or o.may_fail_loud or
-      raise Runfail, "\"#{carg.join " "}\" failed with #{pst.exitstatus}"
+    pst.success? or o.may_fail or
+      raise Runfail, "\"#{carg.join " "}\" exited with " <<
+            (pst.exitstatus ? pst.exitstatus.to_s : "signal #{pst.termsig}")
     pst
   end
 
@@ -155,19 +179,43 @@ end
 if __FILE__ == $0
   include Run
 
-  p run "cat", "-n", __FILE__
+  p run "head", __FILE__
 
   puts "----8<----"
 
   begin
-    run "ls", "boobooyadada"
+    run "ls", "boobooyadada", STDERR => nil
   rescue Runfail => e
     puts "dude, ill fate found us like: #{e}"
   end
 
   puts "----8<----"
 
-  p run("ls", "bahhhabiiyyaya", :error, :may_fail) { |pe|
+  p run("ls", "bahhhabiiyyaya", STDERR, :may_fail) { |pe|
     pe.each { |l| puts "ls whines on us as #{l.inspect}" }
   }
+
+  puts "----8<----"
+
+  run(%w[cat -n], __FILE__, STDOUT) { |fo| run("head", STDIN => fo) }
+
+  puts "----8<----"
+  # DSL-ish indentation for pipe sequences
+  #
+  # Note that in order to relax the situation of pygmentize
+  # not being installed, a simple :may_fail for it does not
+  # suffice, as the demise of pygmentize may provoke a SIGPIPE
+  # for head.
+
+  pyg = "pygmentize"
+
+  begin
+          run(%w[cat -n], __FILE__, STDOUT) {
+     |fo| run("head", STDOUT, STDIN => fo)  {
+     |fo| run(pyg, %w[-g /dev/stdin], STDIN => fo, STDERR => nil)
+    }}
+  rescue Runfail => e
+    puts "cannot run #{pyg} :("
+  end
+
 end
