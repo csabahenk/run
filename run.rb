@@ -128,7 +128,7 @@ module Run
       o.send(d) == nil and o.send d + '=', DEVNULL
     }
 
-    pid = fork {
+    ioredir = proc {
       if pii
         pii[1].close
         STDIN.reopen pii[0]
@@ -146,8 +146,19 @@ module Run
         t = o.send(d)
         t == !!t or Object.const_get(d.upcase).reopen t
       }
-      exec *carg
     }
+    pid = if carg.empty?
+      fork or (
+        ioredir.call
+        return
+      )
+    else
+      fork {
+        ioredir.call
+        exec *carg
+      }
+    end
+
     pii and pii[0].close
     pio and pio[1].close
     pie and pie[1].close
@@ -217,5 +228,9 @@ if __FILE__ == $0
   rescue Runfail => e
     puts "cannot run #{pyg} :("
   end
+
+  puts "----8<----"
+
+  puts (r = run(STDOUT)) ? "child says #{r[0].read.inspect}" : "hi dad"
 
 end
