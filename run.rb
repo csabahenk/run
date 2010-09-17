@@ -4,8 +4,6 @@
 #
 # Copyright (c) 2010 Csaba Henk <csaba@lowlife.hu>
 
-require 'ostruct'
-
 module Run
   extend self
 
@@ -21,25 +19,9 @@ module Run
   class Runfail < Exception
   end
 
-  class OSSafe < OpenStruct
-
-     def method_missing mid, *args
-       mid.to_s =~ /=$/ or @table.include? mid or
-         raise NoMethodError, "undefined method \"#{mid}\""
-       super
-     end
-
-  end
-
-  def run_opts_default
-    {:stdin         => false,
-     :stdout        => false,
-     :stderr        => false,
-     :may_fail      => false}
-  end
-  private :run_opts_default
-
-  @@iomap = { STDIN => :stdin, STDOUT => :stdout, STDERR => :stderr }
+  DEREP = Hash.new { |h, k| k == true ? IO.pipe : k }.merge! \
+            0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
+  IO2PI = { STDIN => 0, STDOUT => 1, STDERR => 1 }
 
   # General syntax:
   #
@@ -105,48 +87,33 @@ module Run
   # +:error+ is passed).
   #
   def run *args
-    carg = []
-    tyarg = { Array => carg, String => carg }
-    args.each { |a| (tyarg[a.class] ||= []) << a }
-    carg.flatten!
-    opts = run_opts_default
-    (tyarg[IO]     || []).each { |io| opts[@@iomap[io]] = true }
-    (tyarg[Symbol] || []).each { |s|  opts[s] = true }
-    (tyarg[Hash]   || []).each { |h|
-      h.each { |k, v| opts[IO === k ? @@iomap[k] : k] = v }
-    }
-
-    o = OSSafe.new opts
-    if block_given? and ![o.stdin, o.stdout, o.stderr].include? true
-      o.stdout = do_lines = true
-    end
-    pii, pio, pie = nil
-    o.stdin  == true and pii = IO.pipe
-    o.stdout == true and pio = IO.pipe
-    o.stderr == true and pie = IO.pipe
-    %w[stdin stdout stderr].each { |d|
-      o.send(d) == nil and o.send d + '=', DEVNULL
-    }
-
-    ioredir = proc {
-      if pii
-        pii[1].close
-        STDIN.reopen pii[0]
-      end
-      if pio
-        pio[0].close
-        STDOUT.reopen pio[1]
-      end
-      if pie
-        pie[0].close
-        STDERR.reopen pie[1]
-      end
-
-      %w[stdin stdout stderr].each { |d|
-        t = o.send(d)
-        t == !!t or Object.const_get(d.upcase).reopen t
+    carg, rest = args.flatten.partition {|x| String === x }
+    may_fail = rest.delete :may_fail
+    redirs = []
+    do_lines = block_given?
+    rest.each { |q|
+      Hash === q or q = { q => true }
+      q.each { |k,v|
+        x, y = DEREP.values_at k, v
+        (x == STDOUT or Array === y) and do_lines = false
+        redirs << [x, y]
       }
     }
+    do_lines and redirs << [STDOUT, IO.pipe]
+
+    ioredir = proc do
+      redirs.each { |io, tg|
+        case tg
+        when Array
+          i = IO2PI[io]
+          tg[1 - i].close
+          io.reopen tg[i]
+        else
+          io.reopen tg
+        end
+      }
+    end
+
     pid = if carg.empty?
       fork or (
         ioredir.call
@@ -159,11 +126,15 @@ module Run
       }
     end
 
-    pii and pii[0].close
-    pio and pio[1].close
-    pie and pie[1].close
+    iofa = []
+    redirs.each { |io, tg|
+      next unless Array === tg
+      i = IO2PI[io]
+      tg[i].close
+      iofa << [io, tg[1 - i]]
+    }
+    fa = iofa.sort_by { |io, f| io.fileno }.transpose[1]
 
-    fa = [(pii||[])[1], (pio||[])[0], (pie||[])[0]].compact
     if block_given?
       begin
         if do_lines
@@ -172,14 +143,14 @@ module Run
           yield *fa
         end
       ensure
-        fa.each { |f| f.closed? or f.close }
+        (fa||[]).each { |f| f.closed? or f.close }
       end
-    elsif !fa.empty?
+    elsif fa
       return fa << pid
     end
 
     pid, pst = Process.wait2 pid
-    pst.success? or o.may_fail or
+    pst.success? or may_fail or
       raise Runfail, "\"#{carg.join " "}\" exited with " <<
             (pst.exitstatus ? pst.exitstatus.to_s : "signal #{pst.termsig}")
     pst
