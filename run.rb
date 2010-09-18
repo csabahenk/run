@@ -23,6 +23,11 @@ module Run
             0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
   IO2PI = { STDIN => 0, STDOUT => 1, STDERR => 1 }
 
+  def argsep args
+    args.flatten.partition {|x| String === x }
+  end
+  private :argsep
+
   # General syntax:
   #
   #   run(*args, *options)
@@ -86,9 +91,23 @@ module Run
   # exception. +:may_fail+ also redirects stderr to /dev/null (unless
   # +:error+ is passed).
   #
-  def run *args
-    carg, rest = args.flatten.partition {|x| String === x }
-    may_fail = rest.delete :may_fail
+  def run *args, &bl
+    res = run! *args, &bl
+
+    case res
+    when Process::Status
+      unless res.success?
+        carg, rest = argsep args
+        raise Runfail, "\"#{carg.join " "}\" exited with " <<
+              (res.exitstatus ? res.exitstatus.to_s : "signal #{res.termsig}")
+      end
+    end
+
+    res
+  end
+
+  def run! *args
+    carg, rest = argsep args
     redirs = []
     do_lines = block_given?
     rest.each { |q|
@@ -150,21 +169,7 @@ module Run
     end
 
     pid, pst = Process.wait2 pid
-    pst.success? or may_fail or
-      raise Runfail, "\"#{carg.join " "}\" exited with " <<
-            (pst.exitstatus ? pst.exitstatus.to_s : "signal #{pst.termsig}")
     pst
-  end
-
-  #
-  # equivalent with
-  #
-  #   run!(:may_fail, ...)
-  #
-  # invocation
-  #
-  def run!(*args, &bl)
-    run(*args, :may_fail, &bl)
   end
 
 end
@@ -184,7 +189,7 @@ if __FILE__ == $0
 
   puts "----8<----"
 
-  p run("ls", "bahhhabiiyyaya", STDERR, :may_fail) { |pe|
+  p run!("ls", "bahhhabiiyyaya", STDERR) { |pe|
     pe.each { |l| puts "ls whines on us as #{l.inspect}" }
   }
 
@@ -196,7 +201,7 @@ if __FILE__ == $0
   # DSL-ish indentation for pipe sequences
   #
   # Note that in order to relax the situation of pygmentize
-  # not being installed, a simple :may_fail for it does not
+  # not being installed, calling it with #run! does not
   # suffice, as the demise of pygmentize may provoke a SIGPIPE
   # for head.
 
