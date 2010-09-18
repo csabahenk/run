@@ -153,6 +153,7 @@ module Run
       iofa << [io, tg[1 - i]]
     }
     fa = iofa.sort_by { |io, f| io.fileno }.transpose[1]
+    fa ||= []
 
     if block_given?
       begin
@@ -162,9 +163,13 @@ module Run
           yield *fa
         end
       ensure
-        (fa||[]).each { |f| f.closed? or f.close }
+        fa.each { |f| f.closed? or f.close }
       end
-    elsif fa
+    end
+
+    if carg.empty? or (!block_given? and !fa.empty?)
+      # if child doesn't exec or there are open
+      # pipes, hand over control to caller
       return fa << pid
     end
 
