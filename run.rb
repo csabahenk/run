@@ -109,6 +109,9 @@ module Run
   end
 
   def run! *args
+    # Separate (arrays of) strings, which are treated as command arguments,
+    # and others, which describe I/O redirections; assemble the redirection
+    # plan, replacing symbolic representatives with real things.
     carg, rest = argsep args
     redirs = []
     do_lines = block_given?
@@ -122,6 +125,7 @@ module Run
     }
     do_lines and redirs << [STDOUT, IO.pipe]
 
+    # This is how child will perform redirection instructions.
     ioredir = proc do
       redirs.each { |io, tg|
         case tg
@@ -136,6 +140,8 @@ module Run
       }
     end
 
+    # Fork child; if there are arguments, exec them
+    # (with failure detection).
     mex = ""
     if carg.empty?
       pid = fork
@@ -160,6 +166,8 @@ module Run
       cp[0].close
     end
 
+    # Post-fork cleanup in parent, put together list
+    # of array of pipes to child.
     iofa = []
     redirs.each { |io, tg|
       next unless Array === tg
@@ -171,12 +179,14 @@ module Run
     fa ||= []
     faclup = proc { fa.each { |f| f.closed? or f.close } }
 
+    # blow up upon exec failure
     unless mex.empty?
       faclup.call
       Process.wait2 pid
       raise Marshal.load mex
     end
 
+    # blocky mode
     if block_given?
       begin
         if do_lines
@@ -195,6 +205,7 @@ module Run
       return fa << pid
     end
 
+    # give back final result
     pid, pst = Process.wait2 pid
     pst
   end
