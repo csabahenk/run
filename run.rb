@@ -127,6 +127,7 @@ module Run
           i = IO2PI[io]
           tg[1 - i].close
           io.reopen tg[i]
+          tg[i].close
         else
           io.reopen tg
         end
