@@ -18,7 +18,7 @@ module Run
   end
   File.exist? DEVNULL or raise "null device not found"
 
-  class Runfail < Exception
+  class Runfail < StandardError
   end
 
   DEREP = Hash.new { |h, k| k == true ? IO.pipe : k }.merge! \
