@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2010 Csaba Henk <csaba@lowlife.hu>
 
+require 'fcntl'
+
 module Run
   extend self
 
@@ -134,16 +136,28 @@ module Run
       }
     end
 
-    pid = if carg.empty?
-      fork or (
+    mex = ""
+    if carg.empty?
+      pid = fork
+      unless pid
         ioredir.call
         return
-      )
+      end
     else
-      fork {
+      cp = IO.pipe
+      pid = fork {
+        cp[0].close
+        cp[1].fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
         ioredir.call
-        exec *carg
+        begin
+          exec *carg
+        rescue Exception => ex
+          Marshal.dump ex, cp[1]
+        end
       }
+      cp[1].close
+      mex = cp[0].read
+      cp[0].close
     end
 
     iofa = []
@@ -155,6 +169,13 @@ module Run
     }
     fa = iofa.sort_by { |io, f| io.fileno }.transpose[1]
     fa ||= []
+    faclup = proc { fa.each { |f| f.closed? or f.close } }
+
+    unless mex.empty?
+      faclup.call
+      Process.wait2 pid
+      raise Marshal.load mex
+    end
 
     if block_given?
       begin
@@ -164,7 +185,7 @@ module Run
           yield *fa
         end
       ensure
-        fa.each { |f| f.closed? or f.close }
+        faclup.call
       end
     end
 
