@@ -5,6 +5,7 @@
 # Copyright (c) 2010 Csaba Henk <csaba@lowlife.hu>
 
 require 'fcntl'
+require 'socket'
 
 module Run
   extend self
@@ -28,9 +29,9 @@ module Run
 
   end
 
-  DEREP = Hash.new { |h, k| k == true ? IO.pipe : k }.merge! \
+  DEREP = Hash.new { |h, k| k }.merge! \
             0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
-  IO2PI = { STDIN => 0, STDOUT => 1, STDERR => 1 }
+  IO2PI = Hash.new(1).merge! STDIN => 0
 
   class RunStatus < Array
 
@@ -40,7 +41,7 @@ module Run
 
     def initialize map, pid
       map.each { |k, v|
-        s = SYM[k] and instance_variable_set s, v
+        (s = SYM[k]) ? instance_variable_set(s, v) : k.close
         self << v
       }
       self << pid
@@ -69,6 +70,15 @@ module Run
     end
 
   end
+
+  def derep pr
+    k, v = pr.map { |e| DEREP[e] }
+    if v == true
+      v = k.fileno < 3 ? IO.pipe : UNIXSocket.socketpair
+    end
+    [k, v]
+  end
+  private :derep
 
   def argsep args
     args.flatten.partition {|x| String === x }
@@ -168,8 +178,8 @@ module Run
     do_lines = block_given?
     rest.each { |q|
       Hash === q or q = { q => true }
-      q.each { |k,v|
-        x, y = DEREP.values_at k, v
+      q.each { |e|
+        x, y = derep e
         (x == STDOUT or Array === y) and do_lines = false
         redirs << [x, y]
       }
