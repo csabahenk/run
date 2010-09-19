@@ -71,19 +71,22 @@ module Run
 
   end
 
-  def derep pr
-    k, v = pr.map { |e| DEREP[e] }
-    if v == true
-      v = k.fileno < 3 ? IO.pipe : UNIXSocket.socketpair
-    end
-    [k, v]
-  end
-  private :derep
+  module PRIV
+    module_function
 
-  def argsep args
-    args.flatten.partition {|x| String === x }
+    def derep pr
+      k, v = pr.map { |e| DEREP[e] }
+      if v == true
+        v = k.fileno < 3 ? IO.pipe : UNIXSocket.socketpair
+      end
+      [k, v]
+    end
+
+    def argsep args
+      args.flatten.partition {|x| String === x }
+    end
+
   end
-  private :argsep
 
   # General syntax:
   #
@@ -149,7 +152,7 @@ module Run
   # +:error+ is passed).
   #
   def run *args, &bl
-    carg, rest = argsep args
+    carg, rest = PRIV.argsep args
 
     rst = run! *args, &bl
     if !rst or         # we are the child
@@ -173,13 +176,13 @@ module Run
     # Separate (arrays of) strings, which are treated as command arguments,
     # and others, which describe I/O redirections; assemble the redirection
     # plan, replacing symbolic representatives with real things.
-    carg, rest = argsep args
+    carg, rest = PRIV.argsep args
     redirs = []
     do_lines = block_given?
     rest.each { |q|
       Hash === q or q = { q => true }
       q.each { |e|
-        x, y = derep e
+        x, y = PRIV.derep e
         (x == STDOUT or Array === y) and do_lines = false
         redirs << [x, y]
       }
