@@ -207,6 +207,7 @@ module Run
         cp[1].fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
         ioredir.call
         begin
+          carg[0] = [carg[0], carg[0]]
           exec *carg
         rescue Exception => ex
           Marshal.dump ex, cp[1]
