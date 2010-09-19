@@ -94,18 +94,24 @@ module Run
   # +:error+ is passed).
   #
   def run *args, &bl
-    res = run! *args, &bl
+    carg, rest = argsep args
 
-    case res
-    when Process::Status
-      unless res.success?
-        carg, rest = argsep args
-        raise Runfail, "\"#{carg.join " "}\" exited with " <<
-              (res.exitstatus ? res.exitstatus.to_s : "signal #{res.termsig}")
-      end
+    res = run! *args, &bl
+    if !res or        # we are the child
+       carg.empty? or # child didn't exec
+       res.size > 1   # we have open pipes
+      return res
     end
 
-    res
+    pid, pst = Process.wait2 res[-1]
+    unless pst.success?
+      raise Runfail, "\"#{carg.join " "}\" exited with " <<
+            (pst.exitstatus ?
+            "status #{pst.exitstatus}" :
+            "signal #{pst.termsig}")
+    end
+
+    pst
   end
 
   def run! *args
@@ -177,7 +183,10 @@ module Run
     }
     fa = iofa.sort_by { |io, f| io.fileno }.transpose[1]
     fa ||= []
-    faclup = proc { fa.each { |f| f.closed? or f.close } }
+    faclup = proc {
+      fa.each { |f| f.closed? or f.close }
+      fa.clear
+    }
 
     # blow up upon exec failure
     unless mex.empty?
@@ -199,15 +208,7 @@ module Run
       end
     end
 
-    if carg.empty? or (!block_given? and !fa.empty?)
-      # if child doesn't exec or there are open
-      # pipes, hand over control to caller
-      return fa << pid
-    end
-
-    # give back final result
-    pid, pst = Process.wait2 pid
-    pst
+    return fa << pid
   end
 
 end
@@ -227,9 +228,10 @@ if __FILE__ == $0
 
   puts "----8<----"
 
-  p run!("ls", "bahhhabiiyyaya", STDERR) { |pe|
+  pid, = run!("ls", "bahhhabiiyyaya", STDERR) { |pe|
     pe.each { |l| puts "ls whines on us as #{l.inspect}" }
   }
+  p Process.wait2 pid
 
   puts "----8<----"
 
