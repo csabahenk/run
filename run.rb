@@ -19,6 +19,13 @@ module Run
   File.exist? DEVNULL or raise "null device not found"
 
   class Runfail < StandardError
+
+    def initialize cst
+      @status = cst
+    end
+
+    attr_reader :status
+
   end
 
   DEREP = Hash.new { |h, k| k == true ? IO.pipe : k }.merge! \
@@ -105,7 +112,7 @@ module Run
 
     pid, pst = Process.wait2 res[-1]
     unless pst.success?
-      raise Runfail, "\"#{carg.join " "}\" exited with " <<
+      raise Runfail.new(pst), "\"#{carg.join " "}\" exited with " <<
             (pst.exitstatus ?
             "status #{pst.exitstatus}" :
             "signal #{pst.termsig}")
