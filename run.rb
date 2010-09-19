@@ -32,6 +32,44 @@ module Run
             0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
   IO2PI = { STDIN => 0, STDOUT => 1, STDERR => 1 }
 
+  class RunStatus < Array
+
+    attr_reader :in, :out, :err, :pid, :child_status
+
+    SYM = { STDIN => :@in, STDOUT => :@out, STDERR => :@err }
+
+    def initialize map, pid
+      map.each { |k, v|
+        s = SYM[k] and instance_variable_set s, v
+        self << v
+      }
+      self << pid
+      @pid = pid
+    end
+
+    def ios
+      select { |e| IO === e }
+    end
+
+    def close
+      ios, rest = partition { |e| IO === e }
+      ios.each { |f| f.closed? or f.close }
+      @in, @out, @err = nil
+      clear
+      concat rest
+    end
+
+    def wait
+      @child_status = Process.wait2(@pid)[1] if @pid
+    end
+
+    def complete
+      close
+      wait
+    end
+
+  end
+
   def argsep args
     args.flatten.partition {|x| String === x }
   end
@@ -103,14 +141,14 @@ module Run
   def run *args, &bl
     carg, rest = argsep args
 
-    res = run! *args, &bl
-    if !res or        # we are the child
-       carg.empty? or # child didn't exec
-       res.size > 1   # we have open pipes
-      return res
+    rst = run! *args, &bl
+    if !rst or         # we are the child
+       carg.empty? or  # child didn't exec
+       !rst.ios.empty? # we have open pipes
+      return rst
     end
 
-    pid, pst = Process.wait2 res[-1]
+    pst = rst.wait
     unless pst.success?
       raise Runfail.new(pst), "\"#{carg.join " "}\" exited with " <<
             (pst.exitstatus ?
@@ -179,8 +217,8 @@ module Run
       cp[0].close
     end
 
-    # Post-fork cleanup in parent, put together list
-    # of array of pipes to child.
+    # Post-fork cleanup in parent, set up RunStatus
+    # (registry of outstanding resources)
     iofa = []
     redirs.each { |io, tg|
       next unless Array === tg
@@ -188,17 +226,11 @@ module Run
       tg[i].close
       iofa << [io, tg[1 - i]]
     }
-    fa = iofa.sort_by { |io, f| io.fileno }.transpose[1]
-    fa ||= []
-    faclup = proc {
-      fa.each { |f| f.closed? or f.close }
-      fa.clear
-    }
+    rst = RunStatus.new iofa.sort_by { |io, f| io.fileno }, pid
 
     # blow up upon exec failure
     unless mex.empty?
-      faclup.call
-      Process.wait2 pid
+      rst.complete
       raise Marshal.load mex
     end
 
@@ -206,16 +238,16 @@ module Run
     if block_given?
       begin
         if do_lines
-          fa[0].each { |l| yield l }
+          rst.out.each { |l| yield l }
         else
-          yield *fa
+          yield *rst.ios
         end
       ensure
-        faclup.call
+        rst.close
       end
     end
 
-    return fa << pid
+    return rst
   end
 
 end
@@ -265,6 +297,6 @@ if __FILE__ == $0
 
   puts "----8<----"
 
-  puts (r = run(STDOUT)) ? "child says #{r[0].read.inspect}" : "hi dad"
+  puts (r = run(STDOUT)) ? "child says #{r.out.read.inspect}" : "hi dad"
 
 end
