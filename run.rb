@@ -8,7 +8,6 @@ require 'fcntl'
 require 'socket'
 
 module Run
-  extend self
 
   # too hacky too bad ruby doesn't do it for us
   DEVNULL =
@@ -77,43 +76,109 @@ module Run
             0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
     IO2PI = Hash.new(1).merge! STDIN => 0
 
-    def derep pr
-      k, v = pr.map { |e| DEREP[e] }
-      if v == true
-        v = k.fileno < 3 ? IO.pipe : UNIXSocket.socketpair
-        @ios.concat v
-      end
-      [k, v]
-    end
-
-    def self.argsep args
-      args.flatten.partition {|x| String === x or x.respond_to? :call }
-    end
-
-    def initialize ctrl
-      @ctrl = ctrl
+    def initialize args, block
       @ios = []
-    end
+      @block = block
 
-    def run cact, *args
+      # Separate arguments which specify what the child is to do
+      # from those ones which describe I/O redirection.
+      carg_raw, redir_raw = args.flatten.partition { |x|
+        String === x or x.respond_to? :call
+      }
 
-      # assemble the redirection plan, replacing symbolic representatives
-      # with real things.
-      redirs = []
-      do_lines = block_given?
-      args.each { |q|
+      # Child action.
+      calls, carg = carg_raw.partition { |x| x.respond_to? :call }
+      @carg = calls.last || (carg.empty? ? nil : carg)
+
+      # Parse redirection directives.
+      redir = []
+      do_lines = !!@block
+      redir_raw.each { |q|
         Hash === q or q = { q => true }
         q.each { |e|
-          x, y = derep e
-          (x == STDOUT or Array === y) and do_lines = false
-          redirs << [x, y]
+          x, y = DEREP.values_at *e
+          (x == STDOUT or y == true) and do_lines = false
+          redir << [x, y]
         }
       }
-      do_lines and redirs << [STDOUT, IO.pipe]
+      do_lines and redir << [STDOUT, true]
+
+      @do_lines = do_lines
+      @redir    = redir
+    end
+
+    def run
+      @want_wait = want_wait?
+      run!
+      return @rst unless @want_wait
+
+      pst = @rst.wait
+      unless pst.success?
+        carg_rep = case @carg
+        when Array
+          @carg.join " "
+        else
+          "<ruby>:#{@carg.inspect}"
+        end
+        raise Runfail.new(pst), "\"#{carg_rep}\" exited with " <<
+              (pst.exitstatus ?
+              "status #{pst.exitstatus}" :
+              "signal #{pst.termsig}")
+      end
+
+      pst
+    end
+
+    def run!
+      run_core case @carg
+      when Array
+        # We are to execute a program
+        # in child, compile respective
+        # action. (A control socket
+        # shall be installed to detect
+        # exec failure.)
+        @ctrl = open DEVNULL
+        @redir << [@ctrl, true]
+        proc {
+          @ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
+          begin
+            @carg[0] = [@carg[0], @carg[0]]
+            exec *@carg
+          rescue Exception => ex
+            Marshal.dump ex, @ctrl
+          end
+        }
+      else
+        @carg
+      end
+
+      @rst
+    rescue Exception
+      cleanup
+      raise
+    end
+
+    private
+
+    def want_wait?
+      @carg and          # child action is predefined, and ...
+      (!(@redir.transpose[1] || []).include?(true) or # either no channels
+                                                      # to child are required,
+                                                      # or ...
+       @block) # or are required, but restricted to block context
+    end
+
+    def run_core cact
+      # Prepare I/O.
+      @redir.each { |e|
+        e[1] == true or next
+        e[1] = (e[0].fileno < 3 ? IO.pipe : UNIXSocket.socketpair)
+        @ios.concat e[1]
+      }
 
       # This is how child will perform redirection instructions.
       ioredir = proc do
-        redirs.each { |io, tg|
+        @redir.each { |io, tg|
           case tg
           when Array
             i = IO2PI[io]
@@ -126,8 +191,8 @@ module Run
         }
       end
 
-      # Fork child; if there are arguments, exec them
-      # (with failure detection).
+      # Fork child; if there is pre-specified
+      # action, do that.
       @pid = if cact
         fork {
           ioredir.call
@@ -143,7 +208,7 @@ module Run
       # Post-fork cleanup in parent, set up RunStatus
       # (registry of outstanding resources)
       iofa = []
-      redirs.each { |io, tg|
+      @redir.each { |io, tg|
         next unless Array === tg
         i = IO2PI[io]
         tg[i].close
@@ -163,28 +228,29 @@ module Run
       end
 
       # blocky mode
-      if block_given?
-        if do_lines
-          @rst.out.each { |l| yield l }
+      if @block
+        if @do_lines
+          @rst.out.each { |l| @block[l] }
         else
-          yield *@rst.ios
+          @block[*@rst.ios]
         end
         @rst.close
       end
-
-      return @rst
     end
 
     def cleanup
+      @ctrl and !@ctrl.closed? and @ctrl.close
       @ios.each { |i| i.closed? or i.close }
       @rst.close if @rst
       begin
-        Process.wait @pid, Process::WNOHANG
+        Process.wait @pid, @want_wait ? 0 : Process::WNOHANG
       rescue Errno::ECHILD
       end if @pid
     end
 
   end
+
+  module_function
 
   # General syntax:
   #
@@ -250,60 +316,11 @@ module Run
   # +:error+ is passed).
   #
   def run *args, &bl
-    carg, rest = Runner.argsep args
-
-    rst = run! *args, &bl
-    if !rst or         # we are the child
-       carg.empty? or  # child didn't exec
-       !rst.ios.empty? # we have open pipes
-      return rst
-    end
-
-    pst = rst.wait
-    unless pst.success?
-      raise Runfail.new(pst), "\"#{carg.join " "}\" exited with " <<
-            (pst.exitstatus ?
-            "status #{pst.exitstatus}" :
-            "signal #{pst.termsig}")
-    end
-
-    pst
+    Runner.new(args, bl).run
   end
 
   def run! *args, &bl
-    # Separate arguments which specify what the child is to do
-    # from those ones which describe I/O redirection.
-    carg_raw, rest = Runner.argsep args
-
-    # assemble action plan for child
-    ccalls, carg = carg_raw.partition { |x| x.respond_to? :call }
-    cact = ccalls.last
-
-    r = nil
-    ctrl = nil
-    begin
-      if !cact and !carg.empty?
-        # we are to exec
-        ctrl = open DEVNULL
-        rest << ctrl
-        cact = proc {
-          ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
-          begin
-            carg[0] = [carg[0], carg[0]]
-            exec *carg
-          rescue Exception => ex
-            Marshal.dump ex, ctrl
-          end
-        }
-      end
-
-      r = Runner.new ctrl
-      r.run cact, *rest, &bl
-    rescue Exception
-      ctrl and !ctrl.closed? and ctrl.close
-      r.cleanup if r
-      raise
-    end
+    Runner.new(args, bl).run!
   end
 
 end
