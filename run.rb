@@ -29,10 +29,6 @@ module Run
 
   end
 
-  DEREP = Hash.new { |h, k| k }.merge! \
-            0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
-  IO2PI = Hash.new(1).merge! STDIN => 0
-
   class RunStatus < Array
 
     attr_reader :in, :out, :err, :pid, :child_status
@@ -72,6 +68,11 @@ module Run
   end
 
   module PRIV
+
+    DEREP = Hash.new { |h, k| k }.merge! \
+            0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
+    IO2PI = Hash.new(1).merge! STDIN => 0
+
     module_function
 
     def derep pr
@@ -84,6 +85,90 @@ module Run
 
     def argsep args
       args.flatten.partition {|x| String === x or x.respond_to? :call }
+    end
+
+    def run_internal ctrl, cact, *args
+
+      # assemble the redirection plan, replacing symbolic representatives
+      # with real things.
+      redirs = []
+      do_lines = block_given?
+      args.each { |q|
+        Hash === q or q = { q => true }
+        q.each { |e|
+          x, y = derep e
+          (x == STDOUT or Array === y) and do_lines = false
+          redirs << [x, y]
+        }
+      }
+      do_lines and redirs << [STDOUT, IO.pipe]
+
+      # This is how child will perform redirection instructions.
+      ioredir = proc do
+        redirs.each { |io, tg|
+          case tg
+          when Array
+            i = IO2PI[io]
+            tg[1 - i].close
+            io.reopen tg[i]
+            tg[i].close
+          else
+            io.reopen tg
+          end
+        }
+      end
+
+      # Fork child; if there are arguments, exec them
+      # (with failure detection).
+      pid = if cact
+        fork {
+          ioredir.call
+          cact.call
+        }
+      else
+        fork or (
+          ioredir.call
+          return
+        )
+      end
+
+      # Post-fork cleanup in parent, set up RunStatus
+      # (registry of outstanding resources)
+      iofa = []
+      redirs.each { |io, tg|
+        next unless Array === tg
+        i = IO2PI[io]
+        tg[i].close
+        iofa << [io, tg[1 - i]]
+      }
+      rst = RunStatus.new iofa, pid
+
+      # blow up upon exec failure
+      if ctrl
+        ctrl = rst.ios[-1]
+        rst.delete ctrl
+        mex = ctrl.read
+        ctrl.close
+        unless mex.empty?
+          rst.complete
+          raise Marshal.load mex
+        end
+      end
+
+      # blocky mode
+      if block_given?
+        begin
+          if do_lines
+            rst.out.each { |l| yield l }
+          else
+            yield *rst.ios
+          end
+        ensure
+          rst.close
+        end
+      end
+
+      return rst
     end
 
   end
@@ -172,7 +257,7 @@ module Run
     pst
   end
 
-  def run! *args
+  def run! *args, &bl
     # Separate arguments which specify what the child is to do
     # from those ones which describe I/O redirection.
     carg_raw, rest = PRIV.argsep args
@@ -180,102 +265,28 @@ module Run
     # assemble action plan for child
     ccalls, carg = carg_raw.partition { |x| x.respond_to? :call }
     cact = ccalls.last
+
     ctrl = nil
-    if !cact and !carg.empty?
-      # we are to exec
-      ctrl = open DEVNULL
-      rest << ctrl
-      cact = proc {
-        ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
-        begin
-          carg[0] = [carg[0], carg[0]]
-          exec *carg
-        rescue Exception => ex
-          Marshal.dump ex, ctrl
-        end
-      }
-    end
-
-    # assemble the redirection plan, replacing symbolic representatives
-    # with real things.
-    redirs = []
-    do_lines = block_given?
-    rest.each { |q|
-      Hash === q or q = { q => true }
-      q.each { |e|
-        x, y = PRIV.derep e
-        (x == STDOUT or Array === y) and do_lines = false
-        redirs << [x, y]
-      }
-    }
-    do_lines and redirs << [STDOUT, IO.pipe]
-
-    # This is how child will perform redirection instructions.
-    ioredir = proc do
-      redirs.each { |io, tg|
-        case tg
-        when Array
-          i = IO2PI[io]
-          tg[1 - i].close
-          io.reopen tg[i]
-          tg[i].close
-        else
-          io.reopen tg
-        end
-      }
-    end
-
-    # Fork child; if there are arguments, exec them
-    # (with failure detection).
-    pid = if cact
-      fork {
-        ioredir.call
-        cact.call
-      }
-    else
-      fork or (
-        ioredir.call
-        return
-      )
-    end
-
-    # Post-fork cleanup in parent, set up RunStatus
-    # (registry of outstanding resources)
-    iofa = []
-    redirs.each { |io, tg|
-      next unless Array === tg
-      i = IO2PI[io]
-      tg[i].close
-      iofa << [io, tg[1 - i]]
-    }
-    rst = RunStatus.new iofa, pid
-
-    # blow up upon exec failure
-    if ctrl
-      ctrl = rst.ios[-1]
-      rst.delete ctrl
-      mex = ctrl.read
-      ctrl.close
-      unless mex.empty?
-        rst.complete
-        raise Marshal.load mex
+    begin
+      if !cact and !carg.empty?
+        # we are to exec
+        ctrl = open DEVNULL
+        rest << ctrl
+        cact = proc {
+          ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
+          begin
+            carg[0] = [carg[0], carg[0]]
+            exec *carg
+          rescue Exception => ex
+            Marshal.dump ex, ctrl
+          end
+        }
       end
-    end
 
-    # blocky mode
-    if block_given?
-      begin
-        if do_lines
-          rst.out.each { |l| yield l }
-        else
-          yield *rst.ios
-        end
-      ensure
-        rst.close
-      end
+      PRIV.run_internal ctrl, cact, *rest, &bl
+    ensure
+      ctrl and !ctrl.closed? and crtl.close
     end
-
-    return rst
   end
 
 end
