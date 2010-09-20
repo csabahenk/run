@@ -240,7 +240,7 @@ module Run
       tg[i].close
       iofa << [io, tg[1 - i]]
     }
-    rst = RunStatus.new iofa.sort_by { |io, f| io.fileno }, pid
+    rst = RunStatus.new iofa, pid
 
     # blow up upon exec failure
     unless mex.empty?
