@@ -238,7 +238,15 @@ module Run
         if @do_lines
           @rst.out.each { |l| @block[l] }
         else
-          @block[*@rst.ios]
+          @block[
+            if @rst.ios.size > 1
+               yrst = @rst.dup
+               yrst.pop
+               yrst
+            else
+               @rst[0]
+            end
+          ]
         end
         @rst.close
       end
