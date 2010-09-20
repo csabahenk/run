@@ -48,12 +48,16 @@ module Run
       select { |e| IO === e }
     end
 
-    def close
-      ios, rest = partition { |e| IO === e }
-      ios.each { |f| f.closed? or f.close }
-      @in, @out, @err = nil
-      clear
-      concat rest
+    def close *iocl
+      iocl.empty? and iocl = ios
+      delete_if { |i|
+        iocl.delete i or next
+        i.closed? or i.close
+        SYM.values.each { |s|
+          i == instance_variable_get(s) and instance_variable_set s, nil
+        }
+        true
+      }
     end
 
     def wait
@@ -146,9 +150,8 @@ module Run
       # blow up upon exec failure
       if ctrl
         ctrl = rst.ios[-1]
-        rst.delete ctrl
         mex = ctrl.read
-        ctrl.close
+        rst.close ctrl
         unless mex.empty?
           rst.complete
           raise Marshal.load mex
