@@ -71,27 +71,31 @@ module Run
 
   end
 
-  module PRIV
+  class Runner
 
     DEREP = Hash.new { |h, k| k }.merge! \
             0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
     IO2PI = Hash.new(1).merge! STDIN => 0
 
-    module_function
-
     def derep pr
       k, v = pr.map { |e| DEREP[e] }
       if v == true
         v = k.fileno < 3 ? IO.pipe : UNIXSocket.socketpair
+        @ios.concat v
       end
       [k, v]
     end
 
-    def argsep args
+    def self.argsep args
       args.flatten.partition {|x| String === x or x.respond_to? :call }
     end
 
-    def run_internal ctrl, cact, *args
+    def initialize ctrl
+      @ctrl = ctrl
+      @ios = []
+    end
+
+    def run cact, *args
 
       # assemble the redirection plan, replacing symbolic representatives
       # with real things.
@@ -124,7 +128,7 @@ module Run
 
       # Fork child; if there are arguments, exec them
       # (with failure detection).
-      pid = if cact
+      @pid = if cact
         fork {
           ioredir.call
           cact.call
@@ -145,33 +149,39 @@ module Run
         tg[i].close
         iofa << [io, tg[1 - i]]
       }
-      rst = RunStatus.new iofa, pid
+      @rst = RunStatus.new iofa, @pid
 
       # blow up upon exec failure
-      if ctrl
-        ctrl = rst.ios[-1]
+      if @ctrl
+        ctrl = @rst.ios[-1]
         mex = ctrl.read
-        rst.close ctrl
+        @rst.close ctrl
         unless mex.empty?
-          rst.complete
+          @rst.wait
           raise Marshal.load mex
         end
       end
 
       # blocky mode
       if block_given?
-        begin
-          if do_lines
-            rst.out.each { |l| yield l }
-          else
-            yield *rst.ios
-          end
-        ensure
-          rst.close
+        if do_lines
+          @rst.out.each { |l| yield l }
+        else
+          yield *@rst.ios
         end
+        @rst.close
       end
 
-      return rst
+      return @rst
+    end
+
+    def cleanup
+      @ios.each { |i| i.closed? or i.close }
+      @rst.close if @rst
+      begin
+        Process.wait @pid, Process::WNOHANG
+      rescue Errno::ECHILD
+      end if @pid
     end
 
   end
@@ -240,7 +250,7 @@ module Run
   # +:error+ is passed).
   #
   def run *args, &bl
-    carg, rest = PRIV.argsep args
+    carg, rest = Runner.argsep args
 
     rst = run! *args, &bl
     if !rst or         # we are the child
@@ -263,12 +273,13 @@ module Run
   def run! *args, &bl
     # Separate arguments which specify what the child is to do
     # from those ones which describe I/O redirection.
-    carg_raw, rest = PRIV.argsep args
+    carg_raw, rest = Runner.argsep args
 
     # assemble action plan for child
     ccalls, carg = carg_raw.partition { |x| x.respond_to? :call }
     cact = ccalls.last
 
+    r = nil
     ctrl = nil
     begin
       if !cact and !carg.empty?
@@ -286,9 +297,12 @@ module Run
         }
       end
 
-      PRIV.run_internal ctrl, cact, *rest, &bl
-    ensure
-      ctrl and !ctrl.closed? and crtl.close
+      r = Runner.new ctrl
+      r.run cact, *rest, &bl
+    rescue Exception
+      ctrl and !ctrl.closed? and ctrl.close
+      r.cleanup if r
+      raise
     end
   end
 
