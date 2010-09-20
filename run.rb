@@ -83,12 +83,19 @@ module Run
       # Separate arguments which specify what the child is to do
       # from those ones which describe I/O redirection.
       carg_raw, redir_raw = args.flatten.partition { |x|
-        String === x or x.respond_to? :call
+        String === x or Symbol === x or x.respond_to? :call
       }
 
       # Child action.
-      calls, carg = carg_raw.partition { |x| x.respond_to? :call }
-      @carg = calls.last || (carg.empty? ? nil : carg)
+      calls, carg_sx = carg_raw.partition { |x| x.respond_to? :call }
+      carg_s, carg_x = carg_sx.partition { |x| String === x }
+      carg = calls.last
+      if !carg and !carg_s.empty?
+        carg = carg_s
+        cname = (carg_x.last || carg[0]).to_s
+        carg[0] = [carg[0], cname]
+      end
+      @carg = carg
 
       # Parse redirection directives.
       redir = []
@@ -116,7 +123,7 @@ module Run
       unless pst.success?
         carg_rep = case @carg
         when Array
-          @carg.join " "
+          @carg.flatten[1..-1].join " "
         else
           "<ruby>:#{@carg.inspect}"
         end
@@ -142,7 +149,6 @@ module Run
         proc {
           @ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
           begin
-            @carg[0] = [@carg[0], @carg[0]]
             exec *@carg
           rescue Exception => ex
             Marshal.dump ex, @ctrl
