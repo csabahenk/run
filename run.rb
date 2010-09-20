@@ -83,7 +83,7 @@ module Run
     end
 
     def argsep args
-      args.flatten.partition {|x| String === x }
+      args.flatten.partition {|x| String === x or x.respond_to? :call }
     end
 
   end
@@ -173,10 +173,31 @@ module Run
   end
 
   def run! *args
-    # Separate (arrays of) strings, which are treated as command arguments,
-    # and others, which describe I/O redirections; assemble the redirection
-    # plan, replacing symbolic representatives with real things.
-    carg, rest = PRIV.argsep args
+    # Separate arguments which specify what the child is to do
+    # from those ones which describe I/O redirection.
+    carg_raw, rest = PRIV.argsep args
+
+    # assemble action plan for child
+    ccalls, carg = carg_raw.partition { |x| x.respond_to? :call }
+    cact = ccalls.last
+    ctrl = nil
+    if !cact and !carg.empty?
+      # we are to exec
+      ctrl = open DEVNULL
+      rest << ctrl
+      cact = proc {
+        ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
+        begin
+          carg[0] = [carg[0], carg[0]]
+          exec *carg
+        rescue Exception => ex
+          Marshal.dump ex, ctrl
+        end
+      }
+    end
+
+    # assemble the redirection plan, replacing symbolic representatives
+    # with real things.
     redirs = []
     do_lines = block_given?
     rest.each { |q|
@@ -206,29 +227,16 @@ module Run
 
     # Fork child; if there are arguments, exec them
     # (with failure detection).
-    mex = ""
-    if carg.empty?
-      pid = fork
-      unless pid
+    pid = if cact
+      fork {
+        ioredir.call
+        cact.call
+      }
+    else
+      fork or (
         ioredir.call
         return
-      end
-    else
-      cp = IO.pipe
-      pid = fork {
-        cp[0].close
-        cp[1].fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
-        ioredir.call
-        begin
-          carg[0] = [carg[0], carg[0]]
-          exec *carg
-        rescue Exception => ex
-          Marshal.dump ex, cp[1]
-        end
-      }
-      cp[1].close
-      mex = cp[0].read
-      cp[0].close
+      )
     end
 
     # Post-fork cleanup in parent, set up RunStatus
@@ -243,9 +251,15 @@ module Run
     rst = RunStatus.new iofa, pid
 
     # blow up upon exec failure
-    unless mex.empty?
-      rst.complete
-      raise Marshal.load mex
+    if ctrl
+      ctrl = rst.ios[-1]
+      rst.delete ctrl
+      mex = ctrl.read
+      ctrl.close
+      unless mex.empty?
+        rst.complete
+        raise Marshal.load mex
+      end
     end
 
     # blocky mode
