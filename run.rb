@@ -63,6 +63,10 @@ module Run
       @child_status = Process.wait2(@pid)[1] if @pid
     end
 
+    def kill sig = "TERM"
+      Process.kill sig, @pid if @pid
+    end
+
     def complete
       close
       wait
@@ -115,9 +119,8 @@ module Run
     end
 
     def run
-      @want_wait = want_wait?
       run!
-      return @rst unless @want_wait
+      return @rst unless want_wait?
 
       pst = @rst.wait
       unless pst.success?
@@ -256,10 +259,16 @@ module Run
       @ctrl and !@ctrl.closed? and @ctrl.close
       @ios.each { |i| i.closed? or i.close }
       @rst.close if @rst
-      begin
-        Process.wait @pid, @want_wait ? 0 : Process::WNOHANG
-      rescue Errno::ECHILD
-      end if @pid
+      if @pid
+        begin
+          Process.kill "KILL", @pid
+        rescue Errno::ESRCH
+        end
+        begin
+          Process.wait @pid
+        rescue Errno::ECHILD
+        end
+      end
     end
 
   end
