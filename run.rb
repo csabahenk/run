@@ -87,35 +87,39 @@ module Run
       # Separate arguments which specify what the child is to do
       # from those ones which describe I/O redirection.
       carg_raw, redir_raw = args.flatten.partition { |x|
-        String === x or Symbol === x or x.respond_to? :call
+        String === x or x.respond_to? :call
       }
 
-      # Child action.
-      calls, carg_sx = carg_raw.partition { |x| x.respond_to? :call }
-      carg_s, carg_x = carg_sx.partition { |x| String === x }
-      carg = calls.last
-      if !carg and !carg_s.empty?
-        carg = carg_s
-        cname = (carg_x.last || carg[0]).to_s
-        carg[0] = [carg[0], cname]
-      end
-      @carg = carg
-
-      # Parse redirection directives.
+      # Parse redirection directives and options.
+      opts = {}
       redir = []
       do_lines = !!@block
       redir_raw.each { |q|
         Hash === q or q = { q => true }
-        q.each { |e|
-          x, y = DEREP.values_at *e
+        q.each { |k, v|
+          Symbol === k and (opts[k] = v; next)
+          x, y = DEREP.values_at k, v
           (x == STDOUT or y == true) and do_lines = false
           redir << [x, y]
         }
       }
       do_lines and redir << [STDOUT, true]
-
       @do_lines = do_lines
       @redir    = redir
+
+      # options.
+      @frail = opts[:frail]
+
+      # Child action.
+      carg = {}
+      calls, cargv = carg_raw.partition { |x| x.respond_to? :call }
+      carg = calls.last
+      if !carg and !cargv.empty?
+        carg = cargv
+        cname = opts[:argv0] || carg[0]
+        carg[0] = [carg[0], cname]
+      end
+      @carg = carg
     end
 
     def run
@@ -123,7 +127,7 @@ module Run
       return @rst unless want_wait?
 
       pst = @rst.wait
-      unless pst.success?
+      unless pst.success? or @frail
         carg_rep = case @carg
         when Array
           @carg.flatten[1..-1].join " "
