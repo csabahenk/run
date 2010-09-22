@@ -24,7 +24,7 @@ module Run
       @status = cst
     end
 
-    attr_reader :status, :run_unwaited_pid
+    attr_reader :status
 
   end
 
@@ -159,12 +159,8 @@ module Run
       end
 
       @rst
-    rescue Exception => ex
+    rescue Exception
       cleanup
-      ex.instance_variable_set :@run_unwaited_pid, @pid
-      class << ex
-        attr_reader :run_unwaited_pid
-      end
       raise
     end
 
@@ -260,11 +256,10 @@ module Run
       @ctrl and !@ctrl.closed? and @ctrl.close
       @ios.each { |i| i.closed? or i.close }
       @rst.close if @rst
-      @pid and begin
+      begin
         Process.wait @pid, @want_wait ? 0 : Process::WNOHANG
       rescue Errno::ECHILD
-        @pid = nil
-      end and @pid = nil
+      end if @pid
     end
 
   end
