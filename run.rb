@@ -292,7 +292,9 @@ module Run
       # blocky mode
       if @block
         if @do_lines
-          @rst.out.each { |l| @block[l] }
+          @rst.out.each { |l|
+            @block[l] if l.sub! /#{Regexp.escape $/}$/m, ""
+          }
         else
           @block[
             if @rst.ios.size > 1
