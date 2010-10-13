@@ -7,6 +7,15 @@
 require 'fcntl'
 require 'socket'
 
+if RUBY_VERSION < '1.9'
+  class Symbol
+    def to_proc
+      proc { |obj, *args| obj.send self, *args }
+    end
+  end
+end
+
+
 module Run
 
   # too hacky too bad ruby doesn't do it for us
@@ -34,10 +43,12 @@ module Run
 
     SYM = { STDIN => :@in, STDOUT => :@out, STDERR => :@err }
 
-    def initialize map, pid
-      map.each { |k, v|
-        (s = SYM[k]) ? instance_variable_set(s, v) : k.close
-        self << v
+    def initialize redirs, pid
+      redirs.each { |r|
+        (s = SYM[r.from]) ?
+          instance_variable_set(s, r.parent_chan) :
+          r.from.close
+        self << r.parent_chan
       }
       self << pid
       @pid = pid
@@ -74,11 +85,63 @@ module Run
 
   end
 
-  class Runner
+  class Redir
 
     DEREP = Hash.new { |h, k| k }.merge! \
-            0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL
-    IO2PI = Hash.new(1).merge! STDIN => 0
+            0 => STDIN, 1 => STDOUT, 2 => STDERR, nil => DEVNULL, true => nil
+
+    def initialize from, to
+      @from, @to = DEREP.values_at from, to
+      @to or @_channel = true
+    end
+
+    attr_reader :from, :to, :_channel
+    attr_writer :channel
+
+    # _channel? tells if redir is intrinsically a channel
+    alias _channel? _channel
+
+    # channel? tells if redir was created with intent of being a channel
+    def channel?
+      instance_variable_defined?(:@channel) ? @channel : @_channel
+    end
+
+    def setup
+      @to ||= case @from
+      when STDIN
+        IO.pipe.reverse
+      when STDOUT, STDERR
+        IO.pipe
+      else
+        UNIXSocket.socketpair
+      end
+    end
+
+    def defeat_lines?
+      @from == STDOUT or channel?
+    end
+
+    def parent_chan
+      @to[0]
+    end
+
+    def child_chan
+      @to[1]
+    end
+
+    def reopen
+      if _channel?
+        parent_chan.close
+        @from.reopen child_chan
+        child_chan.close
+      else
+        @from.reopen @to
+      end
+    end
+
+  end
+
+  class Runner
 
     def initialize args, block
       @ios = []
@@ -86,26 +149,26 @@ module Run
 
       # Separate arguments which specify what the child is to do
       # from those ones which describe I/O redirection.
-      carg_raw, redir_raw = args.flatten.partition { |x|
+      carg_raw, redirs_raw = args.flatten.partition { |x|
         String === x or x.respond_to? :call
       }
 
       # Parse redirection directives and options.
       opts = {}
-      redir = []
+      redirs = []
       do_lines = !!@block
-      redir_raw.each { |q|
+      redirs_raw.each { |q|
         Hash === q or q = { q => true }
         q.each { |k, v|
           Symbol === k and (opts[k] = v; next)
-          x, y = DEREP.values_at k, v
-          (x == STDOUT or y == true) and do_lines = false
-          redir << [x, y]
+          r = Redir.new k, v
+          r.defeat_lines? and do_lines = false
+          redirs << r
         }
       }
-      do_lines and redir << [STDOUT, true]
+      do_lines and redirs << Redir.new(STDOUT, true)
       @do_lines = do_lines
-      @redir    = redir
+      @redirs   = redirs
 
       # options.
       @frail = opts[:frail]
@@ -120,6 +183,8 @@ module Run
         carg[0] = [carg[0], cname]
       end
       @carg = carg
+
+      want_wait?
     end
 
     def run
@@ -152,7 +217,8 @@ module Run
         # shall be installed to detect
         # exec failure.)
         @ctrl = open DEVNULL
-        @redir << [@ctrl, true]
+        @redirs << Redir.new(@ctrl, true)
+        @redirs[-1].channel = false
         proc {
           @ctrl.fcntl Fcntl::F_SETFD, Fcntl::FD_CLOEXEC
           begin
@@ -174,46 +240,30 @@ module Run
     private
 
     def want_wait?
-      @carg and          # child action is predefined, and ...
-      (!(@redir.transpose[1] || []).include?(true) or # either no channels
-                                                      # to child are required,
-                                                      # or ...
+      @carg and  # child action is predefined, and ...
+      (# and either no channels to child are required, or ...
+       @redirs.select(&:channel?).empty? or
        @block) # or are required, but restricted to block context
     end
 
     def run_core cact
       # Prepare I/O.
-      @redir.each { |e|
-        e[1] == true or next
-        e[1] = (e[0].fileno < 3 ? IO.pipe : UNIXSocket.socketpair)
-        @ios.concat e[1]
+      @redirs.each { |r|
+        r._channel? or next
+        r.setup
+        @ios.concat r.to
       }
-
-      # This is how child will perform redirection instructions.
-      ioredir = proc do
-        @redir.each { |io, tg|
-          case tg
-          when Array
-            i = IO2PI[io]
-            tg[1 - i].close
-            io.reopen tg[i]
-            tg[i].close
-          else
-            io.reopen tg
-          end
-        }
-      end
 
       # Fork child; if there is pre-specified
       # action, do that.
       @pid = if cact
         fork {
-          ioredir.call
+          @redirs.each &:reopen
           cact.call
         }
       else
         fork or (
-          ioredir.call
+          @redirs.each &:reopen
           return
         )
       end
@@ -221,11 +271,10 @@ module Run
       # Post-fork cleanup in parent, set up RunStatus
       # (registry of outstanding resources)
       iofa = []
-      @redir.each { |io, tg|
-        next unless Array === tg
-        i = IO2PI[io]
-        tg[i].close
-        iofa << [io, tg[1 - i]]
+      @redirs.each { |r|
+        r._channel? or next
+        r.child_chan.close
+        iofa << r
       }
       @rst = RunStatus.new iofa, @pid
 
