@@ -135,7 +135,7 @@ module Run
         @from.reopen child_chan
         child_chan.close
       else
-        @from.reopen @to
+        @from.reopen *[@to].flatten
       end
     end
 
