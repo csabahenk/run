@@ -293,7 +293,8 @@ module Run
       if @block
         if @do_lines
           @rst.out.each { |l|
-            @block[l] if l.sub! /#{Regexp.escape $/}$/m, ""
+            l.sub! /#{Regexp.escape $/}$/m, ""
+            @block[l]
           }
         else
           @block[
